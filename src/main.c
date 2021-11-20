@@ -97,6 +97,59 @@ static int data_publish(struct mqtt_client *c, enum mqtt_qos qos,
     return mqtt_publish(c, &param);
 }
 
+/**@brief Function to publish data on the configured topic
+ */
+static int power_data_publish(struct mqtt_client *c, enum mqtt_qos qos,
+                        uint8_t *data, size_t len)
+{
+    struct mqtt_publish_param param;
+
+    param.message.topic.qos = qos;
+    param.message.topic.topic.utf8 = CONFIG_MQTT_PUB_POWER_TOPIC;
+    param.message.topic.topic.size = strlen(CONFIG_MQTT_PUB_POWER_TOPIC);
+    param.message.payload.data = data;
+    param.message.payload.len = len;
+    param.message_id = sys_rand32_get();
+    param.dup_flag = 0;
+    param.retain_flag = 0;
+
+    if (DEBUG > 3)
+    {
+        data_print("Publishing: ", data, len);
+        printk("to topic: %s len: %u\n",
+               CONFIG_MQTT_PUB_POWER_TOPIC,
+               (unsigned int)strlen(CONFIG_MQTT_PUB_POWER_TOPIC));
+    }
+
+    return mqtt_publish(c, &param);
+}
+
+static int gps_data_publish(struct mqtt_client *c, enum mqtt_qos qos,
+                        uint8_t *data, size_t len)
+{
+    struct mqtt_publish_param param;
+
+    param.message.topic.qos = qos;
+    param.message.topic.topic.utf8 = CONFIG_MQTT_PUB_GPS_TOPIC;
+    param.message.topic.topic.size = strlen(CONFIG_MQTT_PUB_GPS_TOPIC);
+    param.message.payload.data = data;
+    param.message.payload.len = len;
+    param.message_id = sys_rand32_get();
+    param.dup_flag = 0;
+    param.retain_flag = 0;
+
+    if (DEBUG > 3)
+    {
+        data_print("Publishing: ", data, len);
+        printk("to topic: %s len: %u\n",
+               CONFIG_MQTT_PUB_GPS_TOPIC,
+               (unsigned int)strlen(CONFIG_MQTT_PUB_GPS_TOPIC));
+    }
+
+    return mqtt_publish(c, &param);
+}
+
+
 /**@brief Function to subscribe to the configured topic
  */
 static int subscribe(void)
@@ -1146,6 +1199,52 @@ static void print_fix_data(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
            pvt_data->datetime.minute, pvt_data->datetime.seconds);
 }
 
+static void fix_data_publish(struct nrf_modem_gnss_pvt_data_frame *pvt_data)
+{
+    int err;
+    int ret;
+    char *message;
+
+    printk("Latitude:   %.06f\n", pvt_data->latitude);
+    printk("Longitude:  %.06f\n", pvt_data->longitude);
+    printk("Altitude:   %.01f m\n", pvt_data->altitude);
+    printk("Accuracy:   %.01f m\n", pvt_data->accuracy);
+    printk("Speed:      %.01f m/s\n", pvt_data->speed);
+    printk("Heading:    %.01f deg\n", pvt_data->heading);
+    printk("Date:       %02u-%02u-%02u\n", pvt_data->datetime.year,
+           pvt_data->datetime.month, pvt_data->datetime.day);
+    printk("Time (UTC): %02u:%02u:%02u\n", pvt_data->datetime.hour,
+           pvt_data->datetime.minute, pvt_data->datetime.seconds);
+
+    cJSON *root_obj = cJSON_CreateObject();
+
+    err += json_add_number(root_obj, "la", pvt_data->latitude);
+    err += json_add_number(root_obj, "lo", pvt_data->longitude);
+    err += json_add_number(root_obj, "al", pvt_data->altitude);
+    err += json_add_number(root_obj, "sp", pvt_data->speed);
+
+    message = cJSON_Print(root_obj);
+
+    if (message == NULL)
+    {
+        printk("cJSON_Print, error: returned NULL\n");
+        err = -ENOMEM;
+    }
+    else
+    {
+        ret = gps_data_publish(&client,
+                           MQTT_QOS_1_AT_LEAST_ONCE,
+                           message,
+                           strlen(message));
+        if (ret)
+        {
+            printk("Publish failed: %d\n", ret);
+        }
+    }
+    cJSON_FreeString(message);
+    cJSON_Delete(root_obj);
+}
+
 static bool agps_data_download_ongoing(void)
 {
 #ifdef CONFIG_SUPL_CLIENT_LIB
@@ -1240,19 +1339,15 @@ static void f_dump_data(struct ant_data_frame *ant_data)
     // This is when things are corrupted
     if (uint16_decode(p_incoming_data->instantaneous_power) > MAX_POWER)
     {
-        printk("Too Strong:\n");
         return;
-    };
+    }
 
-    //cJSON *reported_obj = cJSON_CreateObject();
     cJSON *root_obj = cJSON_CreateObject();
 
     err += json_add_number(root_obj, "e", (double)p_incoming_data->update_event_count);
     err += json_add_number(root_obj, "a", (double)uint16_decode(p_incoming_data->accumulated_power));
     err += json_add_number(root_obj, "i", (double)uint16_decode(p_incoming_data->instantaneous_power));
     err += json_add_number(root_obj, "t", (double)uint16_decode(p_incoming_data->elapsed_time));
-
-    //err += json_add_obj(root_obj, "p", reported_obj);
 
     message = cJSON_Print(root_obj);
 
@@ -1263,18 +1358,7 @@ static void f_dump_data(struct ant_data_frame *ant_data)
     }
     else
     {
-        // Need to Discover this from a different message at startup
-        char send_topic[] = "s20/60412";
-        /* Removed for testing
-        struct aws_iot_data gps_data = {
-            .qos = MQTT_QOS_0_AT_MOST_ONCE,
-            .topic.type = 0,
-            .topic.str = send_topic,
-            .topic.len = strlen(send_topic),
-            .ptr = message,
-            .len = strlen(message)};
-*/
-        ret = data_publish(&client,
+        ret = power_data_publish(&client,
                            MQTT_QOS_1_AT_LEAST_ONCE,
                            message,
                            strlen(message));
@@ -1284,7 +1368,7 @@ static void f_dump_data(struct ant_data_frame *ant_data)
         }
         if (DEBUG > 3)
         {
-            printk("Publishing: (%s) to (%s)\n", message, send_topic);
+            printk("Publishing Power: (%s)\n", message);
         }
     }
     cJSON_FreeString(message);
@@ -1427,19 +1511,13 @@ do_connect:
         return;
     }
 
-    if (DEBUG > 5)
-        printk("Setup the work code\n");
     cJSON_Init();
 
     /*
-  
     work_init();
 
     k_work_schedule(&connect_work, K_NO_WAIT);
     */
-
-    // Random sleep for 5 seconds to see if the MQTT connects - HACK !!
-    //k_sleep(K_MSEC(5000));
 
     while (1)
     {
@@ -1451,7 +1529,7 @@ do_connect:
         {
             // Ant QUEUE
             (void)k_poll(events, 4, K_FOREVER);
-/* 28-Oct
+
             if (last_pvt.flags &
                 NRF_MODEM_GNSS_PVT_FLAG_FIX_VALID)
             {
@@ -1460,7 +1538,8 @@ do_connect:
                 //cJSON *root_obj = cJSON_CreateObject();
 
                 fix_timestamp = k_uptime_get();
-                print_fix_data(&last_pvt);
+                //print_fix_data(&last_pvt);
+                fix_data_publish(&last_pvt);
 
                 struct tm t;
                 time_t t_of_day;
@@ -1476,7 +1555,7 @@ do_connect:
                 t_of_day = mktime(&t);
 
                 dt = (double)t_of_day;
-                */
+
 /*
                 err += json_add_number(reported_obj, "et", dt);
                 err += json_add_number(reported_obj, "la", last_pvt.latitude);
@@ -1512,11 +1591,10 @@ do_connect:
 */
                 //cJSON_FreeString(message);
                 //cJSON_Delete(root_obj);
-/* 20-Oct
+
                 show_modem_gps();
                 print_satellite_stats(&last_pvt);
             }
-            */
 
             if (events[2].state == K_POLL_STATE_SEM_AVAILABLE &&
                 k_sem_take(events[2].sem, K_NO_WAIT) == 0)
@@ -1541,10 +1619,10 @@ do_connect:
             events[3].state = K_POLL_STATE_NOT_READY;
         }
 
-        if (DEBUG > 8)
-            printk("Out of mqtt_connected condition:\n");
-
         //err = poll(&fds, 1, mqtt_keepalive_time_left(&client));
+
+/* Not sure if this should all go into a semaphore? */
+// Dont really understand the below - its need but ??
         err = poll(&fds, 1, 1500);
         if (err < 0)
         {
@@ -1552,8 +1630,6 @@ do_connect:
             break;
         }
 
-        if (DEBUG > 8)
-            printk("mqtt_live:\n");
         err = mqtt_live(&client);
         if ((err != 0) && (err != -EAGAIN))
         {
@@ -1561,8 +1637,6 @@ do_connect:
             break;
         }
 
-        if (DEBUG > 8)
-            printk("pollin:\n");
         if ((fds.revents & POLLIN) == POLLIN)
         {
             err = mqtt_input(&client);
@@ -1573,23 +1647,19 @@ do_connect:
             }
         }
 
-        if (DEBUG > 8)
-            printk("pollerr:\n");
         if ((fds.revents & POLLERR) == POLLERR)
         {
             printf("POLLERR\n");
             break;
         }
 
-        if (DEBUG > 8)
-            printk("pollnval:\n");
         if ((fds.revents & POLLNVAL) == POLLNVAL)
         {
             printf("POLLNVAL\n");
             break;
         }
-        if (DEBUG > 8)
-            printk("End of While - back to top\n");
+   
+
     }
 
     for (;;)
