@@ -27,6 +27,14 @@ config MQTT_PUB_TOPIC
 	string "MQTT publish topic"
 	default "my/publish/topic"
 
+config MQTT_PUB_POWER_TOPIC
+	string "MQTT publish power topic"
+	default "my/power/topic"
+
+config MQTT_PUB_GPS_TOPIC
+	string "MQTT publish gps topic"
+	default "my/gps/topic"
+
 config MQTT_SUB_TOPIC
 	string "MQTT subscribe topic"
 	default "my/subscribe/topic"
